@@ -26,8 +26,10 @@ class LockingHandler extends \Predis\Session\Handler implements \SessionHandlerI
     const DEFAULT_MAX_EXECUTION_TIME = 30;
 
     private $prefix;
-    private $locked;
-    private $session_id;
+
+    /**
+     * @var string|null Идентификатор последней заблокированной сессии
+     */
     private $lock_key;
     private $spin_lock_wait;
     private $lock_max_wait;
@@ -43,7 +45,6 @@ class LockingHandler extends \Predis\Session\Handler implements \SessionHandlerI
 
         parent::__construct($client, $options);
         $this->prefix = "session";
-        $this->locked = false;
         $this->lock_key = null;
         $this->spin_lock_wait = rand(100000, 300000);
         $this->lock_max_wait = ini_get('max_execution_time');
@@ -68,17 +69,14 @@ class LockingHandler extends \Predis\Session\Handler implements \SessionHandlerI
      * Creates a Session Lock
      * Algorithm loosely Based on lsw memcached handler
      * @access private
+     * @param string $session_id
      * @return Boolean
      * @author: Doram Greenblat <doram.greenblat@payfast.co.za>
      */
-    private function lockSession()
+    private function lockSession(string $session_id)
     {
-        if ($this->locked) {
-            return true;
-        }
-
         $attempts = intval((1000000 / $this->spin_lock_wait) * $this->lock_max_wait);
-        $this->lock_key = $this->session_id . '.lock';
+        $this->lock_key = $session_id . '.lock';
         $iterations = 0;
         $lock_attained = false;
         while (($iterations < $attempts) && (!$lock_attained)) {
@@ -87,7 +85,7 @@ class LockingHandler extends \Predis\Session\Handler implements \SessionHandlerI
                 $this->client->setnx($this->prefix . $this->lock_key, $this->instance_id);
                 if ($this->client->get($this->prefix . $this->lock_key) == $this->instance_id) {
                     $this->client->expire($this->prefix . $this->lock_key, $this->lock_max_wait);
-                    $this->locked = $lock_attained = true;
+                    $lock_attained = true;
                 }
             } else {
                 usleep($this->spin_lock_wait);
@@ -106,13 +104,12 @@ class LockingHandler extends \Predis\Session\Handler implements \SessionHandlerI
      * @return boolean
      * @author: Doram Greenblat <doram.greenblat@payfast.co.za>
      */
-    private function unLockSession($force = false)
+    private function unLockSession($force = false): bool
     {
         $return = false;
         // Prevent other Users from closing $this session.
-        if (($force == true) || (($this->checkLock()) && ($this->client->get($this->prefix . $this->lock_key)) == $this->instance_id)) {
+        if (($force == true) || ($this->checkLock() && ($this->client->get($this->prefix . $this->lock_key)) == $this->instance_id)) {
             $this->client->del($this->prefix . $this->lock_key);
-            $this->locked = false;
             $return = true;
         }
 
@@ -126,33 +123,16 @@ class LockingHandler extends \Predis\Session\Handler implements \SessionHandlerI
      * @return boolean
      * @author: Doram Greenblat <doram.greenblat@payfast.co.za>
      */
-    private function checkLock()
+    private function checkLock(): bool
     {
         $return = false;
-        $this->lock_key = $this->session_id . '.lock';
-        if (($this->client->exists($this->prefix . $this->lock_key))) {
+        if ($this->client->exists($this->prefix . $this->lock_key)) {
             $return = true;
         }
 
         return $return;
     }
 
-
-    /**
-     * setSessionId
-     * Called to populate session_id variable if it has not previously been set.
-     * This is helpful as php does not always call all our functions with session_id
-     * @access private
-     * @param string passed by php
-     * @author: Doram Greenblat <doram.greenblat@payfast.co.za>
-     * @Date: 2016-04-19
-     */
-    private function setSessionId($sessionId)
-    {
-        if (!isset($this->session_id)) {
-            $this->session_id = $sessionId;
-        }
-    }
 
     /**
      * read
@@ -163,16 +143,20 @@ class LockingHandler extends \Predis\Session\Handler implements \SessionHandlerI
      * @return string
      * @author: Doram Greenblat <doram.greenblat@payfast.co.za>
      */
-    public function read($session_id)
+    public function read($session_id): string
     {
-        $this->setSessionId($session_id);
-        if (!$this->lockSession()) {
+        if (!$this->lockSession($session_id)) {
             throw new \RuntimeException('Session locking failed.');
         }
 
-       return parent::read($this->session_id);
+        return parent::read($this->prefix . $session_id);
+
     }
 
+    public function write($session_id, $session_data)
+    {
+        return parent::write($this->prefix . $session_id, $session_data);
+    }
 
     /**
      * close
@@ -197,7 +181,7 @@ class LockingHandler extends \Predis\Session\Handler implements \SessionHandlerI
      */
     public function destroy($session_id)
     {
-        $this->client->del($this->session_id);
+        $this->client->del($this->prefix . $session_id);
         $this->close();
 
         return true;
