@@ -25,12 +25,13 @@ class LockingHandler extends \Predis\Session\Handler implements \SessionHandlerI
 
     const DEFAULT_MAX_EXECUTION_TIME = 30;
 
-    protected $prefix;
-    protected $locked;
-    protected $session_id;
-    protected $lock_key;
-    protected $spin_lock_wait;
-    protected $lock_max_wait;
+    private $prefix;
+    private $locked;
+    private $session_id;
+    private $lock_key;
+    private $spin_lock_wait;
+    private $lock_max_wait;
+    private $instance_id;
 
     /**
      * List of available options:
@@ -39,28 +40,28 @@ class LockingHandler extends \Predis\Session\Handler implements \SessionHandlerI
      */
     public function __construct(ClientInterface $client, array $options = array())
     {
+
         parent::__construct($client, $options);
         $this->prefix = "session";
         $this->locked = false;
         $this->lock_key = null;
         $this->spin_lock_wait = rand(100000, 300000);
         $this->lock_max_wait = ini_get('max_execution_time');
+
         if ($this->lock_max_wait == 0) {
             $this->lock_max_wait = self::DEFAULT_MAX_EXECUTION_TIME;
         }
+
+        $hostname = gethostname();
+
+        if (!$hostname) {
+            throw new \RuntimeException('Не удалось установить имя хоста.');
+        }
+
+        $this->instance_id = $hostname . getmypid();
+
     }
 
-    /**
-     * close
-     * Closes Session and calls session release Lock
-     * @access public
-     * @return boolean
-     * @author: Doram Greenblat <doram.greenblat@payfast.co.za>
-     */
-    public function close()
-    {
-        return $this->unLockSession();
-    }
 
     /**
      * lockSession
@@ -83,10 +84,8 @@ class LockingHandler extends \Predis\Session\Handler implements \SessionHandlerI
         while (($iterations < $attempts) && (!$lock_attained)) {
             $iterations++;
             if (!$this->checkLock()) {
-                // $this->client->setex($this->prefix.$this->lock_key, $this->lock_max_wait, getmypid());
-                // Switched to setnx (ifNot eXist) to prevent race condition where 2 clients see empty lock and set together.
-                $this->client->setnx($this->prefix . $this->lock_key, getmypid());
-                if ($this->client->get($this->prefix . $this->lock_key) == getmypid()) {
+                $this->client->setnx($this->prefix . $this->lock_key, $this->instance_id);
+                if ($this->client->get($this->prefix . $this->lock_key) == $this->instance_id) {
                     $this->client->expire($this->prefix . $this->lock_key, $this->lock_max_wait);
                     $this->locked = $lock_attained = true;
                 }
@@ -111,7 +110,7 @@ class LockingHandler extends \Predis\Session\Handler implements \SessionHandlerI
     {
         $return = false;
         // Prevent other Users from closing $this session.
-        if (($force == true) || (($this->checkLock()) && ($this->client->get($this->prefix . $this->lock_key)) == getmypid())) {
+        if (($force == true) || (($this->checkLock()) && ($this->client->get($this->prefix . $this->lock_key)) == $this->instance_id)) {
             $this->client->del($this->prefix . $this->lock_key);
             $this->locked = false;
             $return = true;
@@ -174,14 +173,17 @@ class LockingHandler extends \Predis\Session\Handler implements \SessionHandlerI
        return parent::read($this->session_id);
     }
 
-    public function write($session_id, $session_data)
-    {
-        $this->setSessionId($session_id);
-        if (!$this->lockSession()) {
-            return false;
-        }
 
-        return parent::write($this->session_id, $session_data);
+    /**
+     * close
+     * Closes Session and calls session release Lock
+     * @access public
+     * @return boolean
+     * @author: Doram Greenblat <doram.greenblat@payfast.co.za>
+     */
+    public function close()
+    {
+        return $this->unLockSession();
     }
 
 
