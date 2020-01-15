@@ -1,5 +1,10 @@
 <?php
 
-echo phpinfo();
+session_start();
+if (!isset($_SESSION['count'])) {
+    $_SESSION['count'] = 0;
+} else {
+    $_SESSION['count']++;
+}
 
-file_put_contents(__DIR__ . '/public/uuid', uniqid());
+echo $_SESSION['count'];
